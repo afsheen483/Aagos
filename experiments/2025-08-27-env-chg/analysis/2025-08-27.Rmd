@@ -1,0 +1,50 @@
+
+
+```{r}
+library(tidyverse)
+library(cowplot)
+library(RColorBrewer)
+library(khroma)
+library(rstatix)
+library(knitr)
+library(kableExtra)
+```
+
+```{r}
+data <- read_csv("experiments/2025-08-27-env-chg/analysis/data/summary.csv")
+
+data <- data %>% mutate(
+  GRADIENT_MODEL = as.factor(GRADIENT_MODEL)
+)
+gradient_data <- data %>% filter(
+  GRADIENT_MODEL == "1"
+)
+nk_data <- data %>% filter(
+  GRADIENT_MODEL == "0"
+)
+
+gradient_data <- gradient_data %>%
+  unite(
+    "treatment", c(CHANGE_FREQUENCY, TOURNAMENT_SIZE)
+  ) %>%
+  mutate(
+    treatment = case_when(
+      treatment == "0_1" ~ "drift",
+      treatment == "0_8" ~ "0",
+      treatment == "1_8" ~ "1"
+    )
+  ) %>%
+  mutate(
+    treatment = as.factor(treatment)
+  )
+```
+
+```{r}
+
+gradient_data %>% ggplot(
+  mapping = aes(y=fitness, x = treatment, fill = treatment)
+) +
+  geom_boxplot()
+
+```
+
