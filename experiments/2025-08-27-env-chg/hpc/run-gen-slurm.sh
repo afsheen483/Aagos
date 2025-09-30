@@ -1,28 +1,42 @@
 #!/usr/bin/env bash
 
+# ---------------------------
+# Experiment configuration
+# ---------------------------
 REPLICATES=100
 EXP_SLUG=2025-08-27-env-chg
 SEED_OFFSET=100000
 JOB_TIME=8:00:00
 JOB_MEM=8G
-PROJECT_NAME=Aagos
+PROJECT_NAME=Aagos_2025/Aagos
 RUNS_PER_SUBDIR=950
-USERNAME=lalejina
+USERNAME=afsheen_ghuman
 
-REPO_DIR=/mnt/home/${USERNAME}/devo_ws/${PROJECT_NAME} # <-- CHANGE THIS to where ever you have this repository stored on your account
-REPO_SCRIPTS_DIR=${REPO_DIR}/scripts
-HOME_EXP_DIR=${REPO_DIR}/experiments/${EXP_SLUG}
+# ---------------------------
+# Paths
+# ---------------------------
+# Your repository location in WSL
+REPO_DIR="/mnt/d/Aagos_2025/Aagos"
+REPO_SCRIPTS_DIR="${REPO_DIR}/scripts"
+HOME_EXP_DIR="${REPO_DIR}/experiments/${EXP_SLUG}"
 
-DATA_DIR=/mnt/scratch/${USERNAME}_scratch/${PROJECT_NAME}/${EXP_SLUG}
-JOB_DIR=${DATA_DIR}/jobs
-CONFIG_DIR=${HOME_EXP_DIR}/hpc/config
+# Output directories for jobs
+DATA_DIR="/mnt/d/Aagos_2025/Aagos/experiments/${EXP_SLUG}/jobs"   # You can adjust
+JOB_DIR="${DATA_DIR}/jobs"
+CONFIG_DIR="${HOME_EXP_DIR}/hpc/config"
 
-# (1) Activate appropriate Python virtual environment
-source ${REPO_DIR}/hpc-env/clipper-hpc-env.sh
-source ${REPO_DIR}/pyenv/bin/activate
+# ---------------------------
+# Activate Python virtual environment
+# ---------------------------
+# Comment out HPC-specific env
+# source ${REPO_DIR}/hpc-env/clipper-hpc-env.sh
 
-# (2) Generate slurm script
-#   - This will generate an events file for each run
+# Activate your local venv
+source "${REPO_DIR}/pyenv/bin/activate"
+
+# ---------------------------
+# Generate Slurm scripts
+# ---------------------------
 python3 gen-slurm.py \
   --runs_per_subdir ${RUNS_PER_SUBDIR} \
   --time_request ${JOB_TIME} \

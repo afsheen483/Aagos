@@ -60,8 +60,7 @@ special_decorators = [
 combos.register_var("environment__COPY_OVER")
 combos.add_val(
     "environment__COPY_OVER",
-    [
-        # Gradient model environments
+    [# Gradient model environments
         "-GRADIENT_MODEL 1 -CHANGE_MAGNITUDE 0 -CHANGE_FREQUENCY 0 -TOURNAMENT_SIZE 8",
         "-GRADIENT_MODEL 1 -CHANGE_MAGNITUDE 1 -CHANGE_FREQUENCY 1 -TOURNAMENT_SIZE 8",
         "-GRADIENT_MODEL 1 -CHANGE_MAGNITUDE 1 -CHANGE_FREQUENCY 2 -TOURNAMENT_SIZE 8",
