@@ -1,37 +1,39 @@
-'''
-Generate slurm job submission scripts - one per condition
-'''
+#!/usr/bin/env python3
+"""
+Generate slurm job submission scripts (two per condition: P1 & P2),
+with batching controls:
+  - seeds_per_task: how many replicates each array task will run
+  - parallel_per_job: how many replicates run concurrently inside a task
+This reduces job count and increases throughput under node-per-user limits.
+"""
 
-import argparse
-import os
-import sys
-import pathlib
+import argparse, os, sys, pathlib, math
 from pyvarco import CombinationCollector
 
-# Add scripts directory to path, import utilities from scripts directory.
+# add scripts dir to path
 sys.path.append(
     os.path.join(
         pathlib.Path(os.path.dirname(os.path.abspath(__file__))).parents[2],
         "scripts"
     )
 )
-import utilities as utils
+import utilities as utils  # noqa: E402
 
-# Default configuration values
+# ------------------ defaults ------------------
 default_seed_offset = 1000
 default_account = None
 default_num_replicates = 30
 default_job_time_request = "8:00:00"
 default_job_mem_request = "4G"
+default_seeds_per_task = 5          # <-- each array task runs 5 replicates
+default_parallel_per_job = 2        # <-- run 2 replicates at a time inside a task
 
 executable = "Aagos"
-
 base_slurm_script_fpath = "./base_slurm_script.txt"
 
-# Create combos
+# ------------------ combos --------------------
 combos = CombinationCollector()
 
-# Parameters that do not change across treatments for this experiment.
 fixed_parameters = {
     "POP_SIZE": "1000",
     "MAX_GENS": "50000",
@@ -46,21 +48,22 @@ fixed_parameters = {
     "BIT_DEL_PROB": "0.001",
     "SUMMARY_INTERVAL": "10000",
     "SNAPSHOT_INTERVAL": "50000",
-    "PHASE_2_ACTIVE": "1",
+
+    # default to Phase 1 (Phase 2 is set per-phase later)
+    "PHASE_2_ACTIVE": "0",
     "PHASE_2_GENE_MOVE_PROB": "0",
     "PHASE_2_BIT_FLIP_PROB": "0.003",
     "PHASE_2_BIT_INS_PROB": "0",
     "PHASE_2_BIT_DEL_PROB": "0"
 }
 
-special_decorators = [
-    "__COPY_OVER"
-]
+special_decorators = ["__COPY_OVER"]
 
 combos.register_var("environment__COPY_OVER")
 combos.add_val(
     "environment__COPY_OVER",
-    [# Gradient model environments
+    [
+        # gradient + nk (same as before)
         "-GRADIENT_MODEL 1 -CHANGE_MAGNITUDE 0 -CHANGE_FREQUENCY 0 -TOURNAMENT_SIZE 8",
         "-GRADIENT_MODEL 1 -CHANGE_MAGNITUDE 1 -CHANGE_FREQUENCY 1 -TOURNAMENT_SIZE 8",
         "-GRADIENT_MODEL 1 -CHANGE_MAGNITUDE 1 -CHANGE_FREQUENCY 2 -TOURNAMENT_SIZE 8",
@@ -72,7 +75,6 @@ combos.add_val(
         "-GRADIENT_MODEL 1 -CHANGE_MAGNITUDE 1 -CHANGE_FREQUENCY 128 -TOURNAMENT_SIZE 8",
         "-GRADIENT_MODEL 1 -CHANGE_MAGNITUDE 1 -CHANGE_FREQUENCY 256 -TOURNAMENT_SIZE 8",
         "-GRADIENT_MODEL 1 -CHANGE_MAGNITUDE 0 -CHANGE_FREQUENCY 0 -TOURNAMENT_SIZE 1",
-        # NK model environments
         "-GRADIENT_MODEL 0 -CHANGE_MAGNITUDE 0 -CHANGE_FREQUENCY 0 -TOURNAMENT_SIZE 8",
         "-GRADIENT_MODEL 0 -CHANGE_MAGNITUDE 1 -CHANGE_FREQUENCY 1 -TOURNAMENT_SIZE 8",
         "-GRADIENT_MODEL 0 -CHANGE_MAGNITUDE 2 -CHANGE_FREQUENCY 1 -TOURNAMENT_SIZE 8",
@@ -88,131 +90,114 @@ combos.add_val(
 )
 
 def main():
-    # Configure command line arguments
-    parser = argparse.ArgumentParser(description="Generate SLURM submission scripts.")
-    parser.add_argument("--data_dir", type=str, help="Where is the base output directory for each run?")
-    parser.add_argument("--config_dir", type=str, help="Where is the configuration directory for experiment?")
-    parser.add_argument("--replicates", type=int, default=default_num_replicates, help="How many replicates should we run of each condition?")
-    parser.add_argument("--job_dir", type=str, default=None, help="Where to output these job files? If none, put in 'jobs' directory inside of the data_dir")
-    parser.add_argument("--seed_offset", type=int, default=default_seed_offset, help="Value to offset random number seeds by")
-    parser.add_argument("--hpc_account", type=str, default=default_account, help="Value to use for the slurm ACCOUNT")
-    parser.add_argument("--time_request", type=str, default=default_job_time_request, help="How long to request for each job on hpc?")
-    parser.add_argument("--mem", type=str, default=default_job_mem_request, help="How much memory to request for each job?")
-    parser.add_argument("--runs_per_subdir", type=int, default=-1, help="How many replicates to clump into job subdirectories")
-    parser.add_argument("--repo_dir", type=str, help="Where is the repository for this experiment?")
+    ap = argparse.ArgumentParser(description="Generate SLURM submission scripts.")
+    ap.add_argument("--data_dir", required=True)
+    ap.add_argument("--config_dir", required=True)
+    ap.add_argument("--replicates", type=int, default=default_num_replicates)
+    ap.add_argument("--job_dir", default=None)
+    ap.add_argument("--seed_offset", type=int, default=default_seed_offset)
+    ap.add_argument("--hpc_account", default=default_account)
+    ap.add_argument("--time_request", default=default_job_time_request)
+    ap.add_argument("--mem", default=default_job_mem_request)
+    ap.add_argument("--runs_per_subdir", type=int, default=-1)
+    ap.add_argument("--repo_dir", required=True)
 
+    # NEW: batching/parallel knobs
+    ap.add_argument("--seeds_per_task", type=int, default=default_seeds_per_task)
+    ap.add_argument("--parallel_per_job", type=int, default=default_parallel_per_job)
 
-    args = parser.parse_args()
+    args = ap.parse_args()
 
-    # Load in the base slurm file
-    base_slurm_script = ""
     with open(base_slurm_script_fpath, "r") as fp:
-        base_slurm_script = fp.read()
+        base = fp.read()
 
-    # Get list of all combinations to run
     combo_list = combos.get_combos()
-
-    # Calculate how many total jobs we have, and what the last id will be
     num_jobs = args.replicates * len(combo_list)
-
-    # Echo chosen options
-    print(f'Generating {num_jobs} jobs across {len(combo_list)} slurm files!')
-    print(f' - Data directory: {args.data_dir}')
-    print(f' - Config directory: {args.config_dir}')
-    print(f' - Repository directory: {args.repo_dir}')
-    print(f' - Job directory: {args.job_dir}')
-    print(f' - Replicates: {args.replicates}')
-    print(f' - Account: {args.hpc_account}')
-    print(f' - Time Request: {args.time_request}')
-    print(f' - Memory: {args.mem}')
-    print(f' - Seed offset: {args.seed_offset}')
-
-    # If no job_dir provided, default to data_dir/jobs
-    if args.job_dir == None:
+    if args.job_dir is None:
         args.job_dir = os.path.join(args.data_dir, "jobs")
 
-    # Create a job file for each condition
+    print(f"Generating {num_jobs} replicates across {len(combo_list)} conditions")
+    print(f"Seeds per task: {args.seeds_per_task} | Parallel per job: {args.parallel_per_job}")
+
     cur_job_id = 0
     cond_i = 0
     cur_subdir_run_cnt = 0
     cur_run_subdir_id = 0
 
-    # Localize some commandline args for convenience ( less typing :) )
-    config_dir = args.config_dir
-    data_dir = args.data_dir
-    job_dir = args.job_dir
-    repo_dir = args.repo_dir
-
-    # -- Generate slurm script for each condition --
     for condition_info in combo_list:
-        # print(condition_info)
-        # Calc current seed (all runs should have a unique random seed).
-        cur_seed = args.seed_offset + (cur_job_id * args.replicates)
-        filename_prefix = f'RUN_C{cond_i}'
-        file_str = base_slurm_script
-        file_str = file_str.replace("<<TIME_REQUEST>>", args.time_request)
-        file_str = file_str.replace("<<ARRAY_ID_RANGE>>", f"1-{args.replicates}")
-        file_str = file_str.replace("<<MEMORY_REQUEST>>", args.mem)
-        file_str = file_str.replace("<<JOB_NAME>>", f"C{cond_i}")
-        file_str = file_str.replace("<<CONFIG_DIR>>", config_dir)
-        file_str = file_str.replace("<<REPO_DIR>>", repo_dir)
-        file_str = file_str.replace("<<EXEC>>", executable)
-        file_str = file_str.replace("<<JOB_SEED_OFFSET>>", str(cur_seed))
-        if args.hpc_account == None:
-            file_str = file_str.replace("<<HPC_ACCOUNT_INFO>>", "")
+        cur_seed_offset = args.seed_offset + (cur_job_id * args.replicates)
+        filename_prefix = f"RUN_C{cond_i}"
+
+        # prepare common template fields
+        tpl = base
+        tpl = tpl.replace("<<TIME_REQUEST>>", args.time_request)
+        # array size = ceil(replicates / seeds_per_task)
+        array_len = math.ceil(args.replicates / args.seeds_per_task)
+        tpl = tpl.replace("<<ARRAY_ID_RANGE>>", f"1-{array_len}")
+        tpl = tpl.replace("<<MEMORY_REQUEST>>", args.mem)
+        tpl = tpl.replace("<<CONFIG_DIR>>", args.config_dir)
+        tpl = tpl.replace("<<REPO_DIR>>", args.repo_dir)
+        tpl = tpl.replace("<<EXEC>>", executable)
+        tpl = tpl.replace("<<JOB_SEED_OFFSET>>", str(cur_seed_offset))
+        tpl = tpl.replace("<<SEEDS_PER_TASK>>", str(args.seeds_per_task))
+        tpl = tpl.replace("<<PARALLEL_PER_JOB>>", str(args.parallel_per_job))
+        tpl = tpl.replace("<<CPUS_PER_TASK>>", str(args.parallel_per_job))
+        tpl = tpl.replace("<<REPLICATES>>", str(args.replicates))
+        if args.hpc_account is None:
+            tpl = tpl.replace("<<HPC_ACCOUNT_INFO>>", "")
         else:
-            file_str = file_str.replace("<<HPC_ACCOUNT_INFO>>", f"#SBATCH --account {args.hpc_account}")
+            tpl = tpl.replace("<<HPC_ACCOUNT_INFO>>", f"#SBATCH --account {args.hpc_account}")
 
-        # Configure run directory
-        run_dir = os.path.join(data_dir, f"{filename_prefix}_"+"${SEED}")
-        file_str = file_str.replace("<<RUN_DIR>>", run_dir)
-
-        # -- Build command line parameters --
-        # Start by adding in fixed parameters
-        cmd_line_params = {param:fixed_parameters[param] for param in fixed_parameters}
-        cmd_line_params["SEED"] = "${SEED}"
-        # Then, add condition-specific parameters (starting with non-__COPY_OVER params)
+        # base params (phase-independent)
+        base_params = {k: fixed_parameters[k] for k in fixed_parameters}
+        base_params["SEED"] = "${SEED}"
         for param in condition_info:
-            if any([dec in param for dec in special_decorators]):
+            if any(dec in param for dec in special_decorators):
                 continue
-            cmd_line_params[param] = condition_info[param]
+            base_params[param] = condition_info[param]
+        copy_over = [condition_info[k] for k in condition_info if "__COPY_OVER" in k]
 
-        # Build command line parameter string (including any 'copy_over' parameters)
-        params = list(cmd_line_params.keys())
-        params.sort()
-        set_params = [f"-{param} {cmd_line_params[param]}" for param in params]
-        copy_params = [condition_info[key] for key in condition_info if "__COPY_OVER" in key]
-        run_param_str = " ".join(set_params + copy_params)
+        for phase_flag, phase_label, phase_val in [(0, "P1", "1"), (1, "P2", "2")]:
+            params = dict(base_params)
+            params["PHASE_2_ACTIVE"] = str(phase_flag)
+            keyz = sorted(params.keys())
+            set_params = [f"-{k} {params[k]}" for k in keyz]
+            run_param_str = " ".join(set_params + copy_over)
 
-        run_cmds = []
-        run_cmds.append(f'RUN_PARAMS="{run_param_str}"')
-        run_cmds.append('echo "./${EXEC} ${RUN_PARAMS}" > cmd.log')
-        run_cmds.append('./${EXEC} ${RUN_PARAMS} > run.log')
-        run_cmds_str = "\n".join(run_cmds)
+            job_name = f"C{cond_i}_{phase_label}"
+            run_dir_prefix = os.path.join(args.data_dir, f"{filename_prefix}_{phase_label}_")
 
-        file_str = file_str.replace("<<RUN_CMDS>>", run_cmds_str)
+            t = tpl
+            t = t.replace("<<JOB_NAME>>", job_name)
+            t = t.replace("<<RUN_DIR_PREFIX>>", run_dir_prefix)
 
-        # -- Build run configuration copy commands --
-        config_cp_cmds = []
-        config_cp_cmds.append("cp ${CONFIG_DIR}/*.cfg .")
-        config_cp_cmds_str = "\n".join(config_cp_cmds)
-        file_str = file_str.replace("<<CONFIG_CP_CMDS>>", config_cp_cmds_str)
+            run_cmds = []
+            run_cmds.append(f'RUN_PARAMS="{run_param_str}"')
+            run_cmds.append('echo "./${EXEC} ${RUN_PARAMS}" > cmd.log')
+            run_cmds.append('./${EXEC} ${RUN_PARAMS} > run.log')
+            # add a phase column if a simple summary exists
+            run_cmds.append(
+                f"if [ -f summary.csv ]; then awk -v phase_val='{phase_val}' "
+                "'BEGIN{FS=OFS=\",\"} NR==1{$0=$0\",phase\"} NR>1{$0=$0\",\"phase_val} 1' "
+                "summary.csv > summary_with_phase.csv; fi"
+            )
+            t = t.replace("<<RUN_CMDS>>", "\n".join(run_cmds))
 
-        # -- Write job submission file --
-        cur_job_dir = job_dir if args.runs_per_subdir == -1 else os.path.join(job_dir, f"job-set-{cur_run_subdir_id}")
-        utils.mkdir_p(cur_job_dir)
-        with open(os.path.join(cur_job_dir, f'{filename_prefix}.sb'), 'w') as fp:
-            fp.write(file_str)
+            # write job
+            cur_job_dir = args.job_dir if args.runs_per_subdir == -1 else os.path.join(args.job_dir, f"job-set-{cur_run_subdir_id}")
+            utils.mkdir_p(cur_job_dir)
+            out_name = f"{filename_prefix}_{phase_label}.sb"
+            with open(os.path.join(cur_job_dir, out_name), "w") as fp:
+                fp.write(t)
 
-        # Update condition id and current job id
+        # counters
         cur_job_id += 1
         cond_i += 1
         cur_subdir_run_cnt += args.replicates
-        if cur_subdir_run_cnt > (args.runs_per_subdir - args.replicates):
+        if args.runs_per_subdir > -1 and cur_subdir_run_cnt > (args.runs_per_subdir - args.replicates):
             cur_subdir_run_cnt = 0
             cur_run_subdir_id += 1
 
-
-
 if __name__ == "__main__":
     main()
+
