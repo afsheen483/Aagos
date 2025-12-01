@@ -1,0 +1,6 @@
+REPLICATES=10            # or 20 for faster test
+EXP_SLUG=2025-10-07-mut
+SEED_OFFSET=20000
+PROJECT_NAME=Aagos
+RUNS_PER_SUBDIR=950
+
